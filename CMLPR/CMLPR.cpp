@@ -9,7 +9,7 @@
 #include <tesseract/baseapi.h>
 #include <leptonica/allheaders.h>
 
-
+/**/
 using namespace cv;
 using namespace std;
 
@@ -279,7 +279,7 @@ Mat Dilation(Mat binary, int border)
     return img;
 }
 
-Mat Erosion(Mat binary, int windowsize)
+Mat Erosion1(Mat binary, int windowsize)
 {
     Mat img = Mat::zeros(binary.size(), CV_8UC1);
 
@@ -303,6 +303,41 @@ Mat Erosion(Mat binary, int windowsize)
 		}
 	}
 	return img;
+}
+
+Mat Erosion(Mat Edge, int NeighbourCount, uint NeededNeighbours)
+{
+    Mat Eroded = Mat::zeros(Edge.size(), CV_8UC1);
+
+    for (uint y = NeighbourCount; y < Edge.rows - NeighbourCount; y++)
+    {
+        for (uint x = NeighbourCount; x < Edge.cols - NeighbourCount; x++)
+        {
+            if (Edge.at<uchar>(y, x) == 0)
+                continue;
+
+            Eroded.at<uchar>(y, x) = 255;
+            uint FoundNeighbours = 0;
+
+            for (int yy = -NeighbourCount; yy <= NeighbourCount; yy++)
+            {
+                for (int xx = -NeighbourCount; xx <= NeighbourCount; xx++)
+                {
+                    if (Edge.at<uchar>(yy + y, xx + x) == 0)
+                    {
+                        FoundNeighbours++;
+                        if (FoundNeighbours >= NeededNeighbours)
+                        {
+                            Eroded.at<uchar>(y, x) = 0;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    return Eroded;
 }
 Mat ErosionOpt(Mat Edge, int windowsize)
 {
@@ -380,7 +415,152 @@ void GetCharsFromMat(Mat mat)
 }
 
 
+Mat EqualizeHistogram(Mat Grey)
+{
+    int Counts[256] = { 0 };
+    double Probabillity[256] = { 0 };
+    double AccumulatedProbabillity[256] = { 0 };
+    uchar NewValue[256] = { 0 };
+    for (uint y = 0; y < Grey.rows; y++)
+        for (uint x = 0; x < Grey.cols; x++)
+            Counts[Grey.at<uchar>(y, x)]++;
+
+    const double PixelCount = Grey.cols * Grey.rows;
+    for (uint i = 0; i < 256; i++)
+    {
+        Probabillity[i] = (double)Counts[i] / PixelCount;
+        if (i == 0)
+            AccumulatedProbabillity[i] = Probabillity[i];
+        else
+            AccumulatedProbabillity[i] = Probabillity[i] + AccumulatedProbabillity[i - 1];
+        NewValue[i] = round((double)255 * AccumulatedProbabillity[i]);
+    }
+
+    Mat Equalized = Mat::zeros(Grey.size(), CV_8UC1);
+    for (uint y = 0; y < Grey.rows; y++)
+        for (uint x = 0; x < Grey.cols; x++)
+            Equalized.at<uchar>(y, x) = NewValue[Grey.at<uchar>(y, x)];
+
+    return Equalized;
+
+}
+
+int OTSU(Mat Grey)
+{
+    int Counts[256] = { 0 };
+    double Probabillity[256] = { 0 };
+    double Theata[256] = { 0 };
+    for (uint y = 0; y < Grey.rows; y++)
+        for (uint x = 0; x < Grey.cols; x++)
+            Counts[Grey.at<uchar>(y, x)]++;
+
+    const double PixelCount = Grey.cols * Grey.rows;
+    for (uint i = 0; i < 256; i++)
+    {
+        Probabillity[i] = (double)Counts[i] / PixelCount;
+        if (i == 0)
+            Theata[i] = Probabillity[i];
+        else
+            Theata[i] = Probabillity[i] + Theata[i - 1];
+    }
+
+    double meu[256] = { 0 };
+    for (uint i = 1; i < 256; i++)
+        meu[i] = i * Probabillity[i] + meu[i - 1];
+
+
+    double Sigma[256] = { 0 };
+    for (uint i = 0; i < 256; i++)
+        Sigma[i] = (pow(meu[255] * Theata[i] - meu[i], 2) / Theata[i] * (1 - Theata[i]));
+
+    int Index = 0;
+    double MaxVale = 0;
+    for (uint i = 0; i < 256; i++)
+    {
+        if (Sigma[i] > MaxVale)
+        {
+            MaxVale = Sigma[i];
+            Index = i;
+        }
+    }
+
+    return Index + 20;
+}
+
+vector<Mat> FindPlates(Mat Binary)
+{
+    vector<vector<Point>> Contours;
+    vector<Vec4i> Hierarchy;
+    findContours(Binary, Contours, Hierarchy, RETR_EXTERNAL, CHAIN_APPROX_NONE, Point(0, 0));
+
+    vector<Mat> Plates;
+    Rect CurrRect;
+    Scalar black = CV_RGB(0, 0, 0);
+    for (size_t BlobI = 0; BlobI < Contours.size(); BlobI++)
+    {
+        CurrRect = boundingRect(Contours[BlobI]);
+
+        const int BorderWidth = Binary.cols / 10;
+        const bool TooFarLeftRight = CurrRect.x < BorderWidth || CurrRect.x + CurrRect.width > Binary.cols - BorderWidth;
+        const int BorderHeight = Binary.rows / 10;
+        const bool TooFarUpDown = CurrRect.y < BorderHeight;
+
+        const double Height = .5 + (((double)CurrRect.y / (double)Binary.rows) / 2);
+
+        const bool TooSmall = CurrRect.width < 75 * Height || CurrRect.height < 40 * Height;
+        const bool TooBig = CurrRect.width > 300 * Height || CurrRect.height > 300 * Height;
+        const double Ratio = (double)CurrRect.width / (double)CurrRect.height;
+        const bool TooWide = Ratio > 4;
+        const bool TooNarrow = Ratio < 1.35;
+
+        if (TooSmall || TooBig || TooWide || TooNarrow || TooFarLeftRight || TooFarUpDown)
+            continue;
+        else
+            Plates.push_back(Binary(CurrRect));
+    }
+
+    return Plates;
+}
+
 int main()
+{
+    uint found = 0;
+    for (uint i = 0; i < 20; i++)
+    {
+        Mat RGB = imread("Images\\" + to_string(i + 1) + ".jpg");
+
+        Mat Grey = RGB2Gray(RGB);
+        //imshow(to_string(i + 1) +"grey", Grey);
+
+        Mat Equalized = EqualizeHistogram(Grey);
+        //imshow(to_string(i + 1) + " eq", Equalized);
+
+        Mat Avraged = Blur(Equalized, 1);
+        //imshow("avrage " + to_string(i + 1), Avraged);
+
+        int OTSUValue = OTSU(Avraged);
+        Mat Edged = Edge(Avraged, OTSUValue);
+        //imshow("edge " + to_string(i + 1), Edged);
+
+        Mat Eroded = Erosion(Edged, 1, 5);
+        //imshow("erroded " + to_string(i + 1), Eroded);
+
+        Mat Dialated = Dilation(Eroded, 10);
+        //imshow(to_string(i + 1) + "dialated", Dialated);
+
+        vector<Mat> Plates = FindPlates(Dialated);
+        for (size_t ii = 0; ii < Plates.size(); ii++)
+        {
+            imshow("plate " + to_string(i + 1) + " " + depthToString(ii), Plates[ii]);
+        }
+    }
+    waitKey();
+
+    return 0;
+}
+
+
+void main1()
 {    
     Mat img;
     img = imread("C:\\images\\1.jpg");
@@ -420,13 +600,14 @@ int main()
     blurEdge = Edge1(blurEdge, 40);
     //blurEdge = Max(blurEdge, 5);
     //imshow("Blur+Edge img", blurEdge);    
-        
+    /*
+    
     Mat ErodedImg = Erosion(blurEdge, 1);
     imshow("erosion", ErodedImg);
 
 	Mat DialatedImg = Dilation(ErodedImg, 14);
     imshow("dilation", DialatedImg);
-
+    
 
     Mat DialatedImgCopy;
     DialatedImgCopy = DialatedImg.clone();
@@ -472,13 +653,15 @@ int main()
     if(plate.rows != 0 || plate.cols != 0)
     {
         imshow("filtered img", DialatedImgCopy);
+    imshow("result1", plate);
         plate = Min(plate, 1);
+        imshow("result2", plate);
         plate = Gray2Binary(plate, 140);
-        imshow("result", plate);
+        imshow("result3", plate);
 
         GetCharsFromMat(plate);
     }
-
+    */
 
 	//Mat collect = Collect(GrayImg, blurEdge);
 	//collect = Min(collect, 1);
